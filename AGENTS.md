@@ -12,6 +12,7 @@
 - Follow Rust 2021, rustfmt, and the existing Clippy lints.
 - Use the `esp` Rust toolchain, `xtensa-esp32-espidf` target, `ldproxy`, and ESP-IDF `v5.3.3` configured in `rust-toolchain.toml` and `.cargo/config.toml`.
 - Review dependency safety and compatibility with ESP-IDF and the target, including the `embedded-svc` Git patch and locked revisions. Avoid unrelated dependency or lockfile changes.
+- Prefer the newest stable, supported, compatible dependencies, toolchains, and frameworks. Evaluate upgrades for compatibility, security, reliability, maintainability, and hardware constraints; replace obsolete workarounds when newer versions offer safer, simpler, or more maintainable solutions, regardless of prior implementation effort. Use prereleases only with explicit approval.
 - `WIFI_SSID` and `WIFI_PASS` are compile-time environment variables. Supply real values locally; never commit credentials, secrets, credential-bearing firmware, or generated build artifacts (including `target/`, `.embuild/`, and generated SDK configuration).
 
 ## Reliability and safety
