@@ -2,7 +2,7 @@
 
 ## Scope and architecture
 
-- These instructions apply only to `Hjalle7/esp32-wifi-bridge` (Rust). Do not modify the separate `Hjalle7/ESP32-Wifi-Bridge-on-Steroids` C/C++ repository.
+- These instructions apply only to `Hjalle7/esp32-wifi-bridge` (Rust).
 - Prioritize reliability, security, simplicity, and maintainability.
 - Preserve the single-client Ethernet-to-WiFi forwarding architecture in `src/bridge.rs`: learn the source MAC from the first Ethernet frame, clone it onto the WiFi station, and forward frames in both directions. Preserve the `Idle -> EthReady -> WifiReady -> Running` lifecycle; do not introduce routing, NAT, or multi-client behavior without an explicit request.
 - Target WT32-ETH01 (ESP32, 4 MB flash). Respect the existing LAN87XX RMII pin, clock, and PHY configuration and account for flash/RAM limits.
