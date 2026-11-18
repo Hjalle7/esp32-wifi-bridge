@@ -29,7 +29,8 @@ jobs:
 
   rust-checks:
     name: Rust Checks
-    runs-on: ubuntu-latest
+    # ESP-IDF v5.3.3's esp-clang requires the libxml2.so.2 ABI.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +47,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Install ESP-IDF system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libxml2
       - name: Setup Rust
         uses: esp-rs/xtensa-toolchain@v1.5
         with:
