@@ -33,7 +33,7 @@ const unsafe extern "C" fn low_level_state_changed(
 pub unsafe fn install(handle: sys::esp_eth_handle_t) -> sys::esp_err_t {
     let mut mac = ptr::null_mut();
     // SAFETY: the caller owns a live driver; the API writes its MAC pointer.
-    let result = unsafe { sys::esp_eth_get_mac_instance(handle, &mut mac) };
+    let result = unsafe { sys::esp_eth_get_mac_instance(handle, &raw mut mac) };
     if result != sys::ESP_OK {
         return result;
     }
