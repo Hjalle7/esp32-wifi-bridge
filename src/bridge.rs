@@ -89,9 +89,16 @@ impl Drop for Running {
         while !TO_WIFI.is_idle() || !TO_ETH.is_idle() {
             FreeRtos::delay_ms(1);
         }
+        // SAFETY: Wi-Fi is still initialized. In the pinned ESP32 library,
+        // RX registration runs synchronously on the Wi-Fi task via ioctl.
+        // This also finishes an RX callback paused before gate admission,
+        // including its driver-owned buffer release, before Wi-Fi destruction.
+        esp!(unsafe { sys::esp_wifi_internal_reg_rxcb(WifiDeviceId::Sta.into(), None) })
+            .expect("Failed to unregister Wi-Fi RX callback!");
         ETH_HANDLE.store(core::ptr::null_mut(), Ordering::Relaxed);
-        // Field destructors now deinitialize Wi-Fi (unregistering RX), then
-        // stop/uninstall Ethernet. Neither callback has a Rust-owned environment.
+        // This drains transmitters, not callbacks paused before admission.
+        // Wi-Fi stop/unregister synchronize with its task. Late RMII dispatch
+        // uses a static MAC mediator, independent of the uninstalled driver.
     }
 }
 
@@ -151,23 +158,17 @@ impl From<Bridge<Idle>> for Bridge<EthReady> {
         )
         .expect("Failed to init EthDriver!");
 
-        // Register exactly once, before starting RX. Replacing a callback after
-        // stop() alone does not establish that its RX task has returned. A static
-        // function also avoids a closure environment being freed during teardown.
-        // SAFETY: eth is live and stopped, and the callback needs no context.
-        // It consumes/frees every RX buffer according to the input-path contract.
-        esp!(unsafe {
-            sys::esp_eth_update_input_path(
-                eth.handle(),
-                Some(forward_to_wifi),
-                core::ptr::null_mut(),
-            )
-        })
-        .expect("Failed to set Ethernet RX callback!");
+        // SAFETY: initialized ESP32 RMII, never started, no low-level hooks.
+        // A static input function alone is insufficient: the default dispatcher
+        // dereferences a driver-owned mediator before calling it. The RX task
+        // outlives driver uninstall in esp-idf-svc 0.50.1. See SAFETY.md.
+        esp!(unsafe { crate::ethernet_rx::install(eth.handle()) })
+            .expect("Failed to set Ethernet RX callback!");
 
         log::warn!("Waiting to sniff client MAC...");
         eth.start().expect("Failed to start Ethernet!");
         let client_mac = *CLIENT_MAC.wait();
+        log::warn!("Sniffed client MAC: {}", mac2str(client_mac));
 
         eth.stop()
             .expect("Failed to stop Ethernet after MAC sniffing!");
@@ -269,11 +270,10 @@ impl From<Bridge<WifiReady>> for Bridge<Running> {
     }
 }
 
-unsafe extern "C" fn forward_to_wifi(
-    _handle: sys::esp_eth_handle_t,
+pub unsafe extern "C" fn forward_to_wifi(
+    _mediator: *mut sys::esp_eth_mediator_t,
     buf: *mut u8,
     len: u32,
-    _context: *mut c_void,
 ) -> esp_err_t {
     if CLIENT_MAC.get().is_none() && len >= 12 {
         let mut mac = [0; 6];
@@ -282,9 +282,7 @@ unsafe extern "C" fn forward_to_wifi(
         unsafe {
             core::ptr::copy_nonoverlapping(buf.add(6), mac.as_mut_ptr(), mac.len());
         }
-        if CLIENT_MAC.set(mac).is_ok() {
-            log::warn!("Sniffed client MAC: {}", mac2str(mac));
-        }
+        let _ = CLIENT_MAC.set(mac);
     }
 
     let guard = TO_WIFI.try_enter();

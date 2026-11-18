@@ -24,6 +24,8 @@ jobs:
         run: |
           rustc +stable --edition=2021 --test tests/host/callback_gate.rs -o /tmp/bridge-callback-tests
           /tmp/bridge-callback-tests
+          rustc +stable --edition=2021 --test tests/host/ethernet_rx.rs -o /tmp/bridge-ethernet-tests
+          /tmp/bridge-ethernet-tests
 
   rust-checks:
     name: Rust Checks

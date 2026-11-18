@@ -135,3 +135,37 @@ fn racing_close_and_admission_cannot_use_a_reclaimed_resource() {
         assert!(gate.try_enter().is_none());
     }
 }
+
+#[test]
+fn callback_started_before_admission_is_not_drained_but_cannot_transmit() {
+    let gate = CallbackGate::new();
+    let started = Barrier::new(2);
+    let resume = Barrier::new(2);
+    let alive = AtomicBool::new(true);
+    gate.open();
+    thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            // Model Ethernet MAC learning before gate admission.
+            started.wait();
+            resume.wait();
+            assert!(!alive.load(Ordering::Relaxed));
+            assert!(gate.try_enter().is_none());
+        });
+        started.wait();
+        gate.close();
+        assert!(gate.is_idle()); // The callback is still in progress!
+        alive.store(false, Ordering::Relaxed);
+        resume.wait();
+        worker.join().unwrap();
+    });
+}
+
+#[test]
+fn opposite_directions_do_not_reject_each_other() {
+    let to_wifi = CallbackGate::new();
+    let to_eth = CallbackGate::new();
+    to_wifi.open();
+    to_eth.open();
+    let _wifi_guard = to_wifi.try_enter().unwrap();
+    let _eth_guard = to_eth.try_enter().unwrap();
+}

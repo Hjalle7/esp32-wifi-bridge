@@ -7,6 +7,7 @@ use esp_idf_svc::hal::delay;
 
 mod bridge;
 mod callback_gate;
+mod ethernet_rx;
 #[allow(clippy::wildcard_imports)]
 use bridge::*;
 

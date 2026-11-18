@@ -28,6 +28,8 @@ impl CallbackGate {
     }
 
     /// Drop a frame rather than wait if closed or already forwarding this way.
+    /// The pinned SDK serializes RX per direction; busy is defensive only.
+    /// Admission protects transmit resources, not the lifetime of RX dispatch.
     pub fn try_enter(&self) -> Option<CallbackGuard<'_>> {
         self.state
             .compare_exchange(OPEN, OPEN | ACTIVE, Ordering::Acquire, Ordering::Relaxed)
