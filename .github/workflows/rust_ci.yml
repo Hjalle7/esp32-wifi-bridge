@@ -36,11 +36,11 @@ jobs:
       matrix:
         action:
           - command: build
-            args: --release
+            args: --release --locked
           - command: fmt
             args: --all -- --check --color always
           - command: clippy
-            args: --all-targets --all-features --workspace -- -D warnings
+            args: --locked --all-targets --all-features --workspace -- -D warnings
     env:
       WIFI_SSID: My Awesome Network
       WIFI_PASS: hunter2
