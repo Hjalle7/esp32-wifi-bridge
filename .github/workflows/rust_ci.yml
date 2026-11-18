@@ -12,6 +12,19 @@ env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
+  callback-tests:
+    name: Callback Lifecycle Tests (host)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup host Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Test callback admission and teardown
+        run: |
+          rustc +stable --edition=2021 --test tests/host/callback_gate.rs -o /tmp/bridge-callback-tests
+          /tmp/bridge-callback-tests
+
   rust-checks:
     name: Rust Checks
     runs-on: ubuntu-latest

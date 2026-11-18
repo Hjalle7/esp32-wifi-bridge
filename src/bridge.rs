@@ -1,17 +1,32 @@
 //! Wi-Fi to Ethernet Bridge State Machine
 
 extern crate alloc;
-use alloc::{boxed::Box, format, string::String, sync::Arc};
+use alloc::{format, string::String};
+use core::{
+    ffi::c_void,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 
 use esp_idf_svc::{
     eth::{EthDriver, RmiiClockConfig, RmiiEth, RmiiEthChipset},
     eventloop::EspSystemEventLoop,
-    hal::{gpio, modem::Modem, prelude::Peripherals},
+    hal::{delay::FreeRtos, gpio, modem::Modem, prelude::Peripherals},
+    handle::RawHandle,
     nvs::EspDefaultNvsPartition,
+    sys::{self, esp, esp_err_t, ESP_OK},
     wifi::{AuthMethod, ClientConfiguration, Configuration, WifiDeviceId, WifiDriver},
 };
 
 use once_cell::sync::OnceCell;
+
+use crate::callback_gate::CallbackGate;
+
+// ESP-IDF Wi-Fi and Peripherals::take() are singletons. Callbacks use only these
+// static gates and the C Ethernet handle, never a pointer/reference to a Rust driver.
+static TO_WIFI: CallbackGate = CallbackGate::new();
+static TO_ETH: CallbackGate = CallbackGate::new();
+static ETH_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
+static CLIENT_MAC: OnceCell<[u8; 6]> = OnceCell::new();
 
 const SSID: &str = env!("WIFI_SSID");
 const PASS: &str = env!("WIFI_PASS");
@@ -59,11 +74,25 @@ pub struct WifiReady {
 
 /// Running State
 ///
-/// In this state, the bridge keeps the drivers on the heap so their addresses remain stable for
-/// the callbacks that forward frames between them.
+/// Owns both drivers. Drop closes and drains forwarding before destroying Wi-Fi,
+/// then Ethernet (field order). See `SAFETY.md` for the callback/ESP-IDF contracts.
 pub struct Running {
-    _eth: Box<EthDriver<'static, RmiiEth>>,
-    _wifi: Box<WifiDriver<'static>>,
+    wifi: WifiDriver<'static>,
+    eth: EthDriver<'static, RmiiEth>,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        TO_WIFI.close();
+        TO_ETH.close();
+        // Only the owner waits. Packet callbacks never wait for a gate or owner.
+        while !TO_WIFI.is_idle() || !TO_ETH.is_idle() {
+            FreeRtos::delay_ms(1);
+        }
+        ETH_HANDLE.store(core::ptr::null_mut(), Ordering::Relaxed);
+        // Field destructors now deinitialize Wi-Fi (unregistering RX), then
+        // stop/uninstall Ethernet. Neither callback has a Rust-owned environment.
+    }
 }
 
 impl Bridge<Idle> {
@@ -122,30 +151,26 @@ impl From<Bridge<Idle>> for Bridge<EthReady> {
         )
         .expect("Failed to init EthDriver!");
 
-        // could emulate the following logic with mpsc::channel, but this is more efficient
-        // at least in terms of binary size...
-
-        let client_mac: Arc<OnceCell<[u8; 6]>> = Arc::new(OnceCell::new());
-        let client_mac2 = Arc::clone(&client_mac);
-
-        eth.set_rx_callback(move |frame| match frame.as_slice().get(6..12) {
-            Some(mac_bytes) => {
-                let src_mac = mac_bytes.try_into().unwrap();
-                if client_mac2.set(src_mac).is_ok() {
-                    log::warn!("Sniffed client MAC: {}", mac2str(src_mac));
-                }
-            }
-            None => unreachable!("Failed to read source MAC from Ethernet frame!"),
+        // Register exactly once, before starting RX. Replacing a callback after
+        // stop() alone does not establish that its RX task has returned. A static
+        // function also avoids a closure environment being freed during teardown.
+        // SAFETY: eth is live and stopped, and the callback needs no context.
+        // It consumes/frees every RX buffer according to the input-path contract.
+        esp!(unsafe {
+            sys::esp_eth_update_input_path(
+                eth.handle(),
+                Some(forward_to_wifi),
+                core::ptr::null_mut(),
+            )
         })
-        .expect("Failed to set Ethernet callback! (macsniff)");
+        .expect("Failed to set Ethernet RX callback!");
 
         log::warn!("Waiting to sniff client MAC...");
         eth.start().expect("Failed to start Ethernet!");
-        let client_mac = *client_mac.wait();
+        let client_mac = *CLIENT_MAC.wait();
 
-        // maybe this should be non-fatal?
-        eth.set_rx_callback(|_| {})
-            .expect("Failed to unset Ethernet callback! (macsniff)");
+        eth.stop()
+            .expect("Failed to stop Ethernet after MAC sniffing!");
 
         log::warn!("Setting Ethernet promiscuous...");
         eth.set_promiscuous(true)
@@ -165,6 +190,8 @@ impl From<Bridge<Idle>> for Bridge<EthReady> {
 }
 
 /// Transition from [`EthReady`] to [`WifiReady`].
+// Retain fatal credential validation, matching the Running transition below.
+#[allow(clippy::fallible_impl_from)]
 impl From<Bridge<EthReady>> for Bridge<WifiReady> {
     fn from(val: Bridge<EthReady>) -> Self {
         let mut wifi = WifiDriver::new(val.state.modem, val.state.sysloop.clone(), val.state.nvs)
@@ -194,12 +221,16 @@ impl From<Bridge<EthReady>> for Bridge<WifiReady> {
 }
 
 /// Transition from [`WifiReady`] to [`Running`].
-// don't care about panic due to try_from().unwrap()
+// Retain the existing fatal initialization policy for state transitions.
 #[allow(clippy::fallible_impl_from)]
 impl From<Bridge<WifiReady>> for Bridge<Running> {
     fn from(val: Bridge<WifiReady>) -> Self {
-        let mut eth = Box::new(val.state.eth);
-        let mut wifi = Box::new(val.state.wifi);
+        // Establish teardown ownership before registration or any fallible start.
+        // Gates stay closed throughout fallible driver initialization.
+        let mut running = Running {
+            wifi: val.state.wifi,
+            eth: val.state.eth,
+        };
 
         let wifi_config = Configuration::Client(ClientConfiguration {
             ssid: SSID.try_into().unwrap(),
@@ -208,60 +239,93 @@ impl From<Bridge<WifiReady>> for Bridge<Running> {
             ..Default::default()
         });
 
-        wifi.set_configuration(&wifi_config)
+        running
+            .wifi
+            .set_configuration(&wifi_config)
             .expect("Failed to set Wi-Fi configuration!");
         log::warn!("Wi-Fi configuration set!");
 
-        let eth_ptr = &mut *eth as *mut EthDriver<'static, RmiiEth> as usize;
+        ETH_HANDLE.store(running.eth.handle(), Ordering::Relaxed);
+
+        // SAFETY: Client-only Wi-Fi is initialized and stopped. The callback is a
+        // static function with no borrowed environment. Running owns teardown.
+        // Deliberately register RX only: esp-idf-svc 0.50.1's TX wrapper creates
+        // an invalid slice even with an empty callback; we never install it.
+        esp!(unsafe {
+            sys::esp_wifi_internal_reg_rxcb(WifiDeviceId::Sta.into(), Some(forward_to_eth))
+        })
+        .expect("Failed to set Wi-Fi RX callback!");
+
+        running.wifi.start().expect("Failed to start Wi-Fi!");
+        running.eth.start().expect("Failed to start Ethernet!");
+        running.wifi.connect().expect("Failed to connect to Wi-Fi!");
+
+        // Release/acquire admission publishes the handle only after both drivers
+        // are owned and started. Neither callback accesses the Rust driver values.
+        TO_WIFI.open();
+        TO_ETH.open();
+
+        Self { state: running }
+    }
+}
+
+unsafe extern "C" fn forward_to_wifi(
+    _handle: sys::esp_eth_handle_t,
+    buf: *mut u8,
+    len: u32,
+    _context: *mut c_void,
+) -> esp_err_t {
+    if CLIENT_MAC.get().is_none() && len >= 12 {
+        let mut mac = [0; 6];
+        // SAFETY: ESP-IDF supplies a readable RX buffer of len bytes. The checked
+        // source-MAC range is within it and the local destination cannot overlap.
         unsafe {
-            wifi.set_nonstatic_callbacks(
-                {
-                    let eth_ptr = eth_ptr;
-                    move |_, frame| {
-                        // SAFETY: eth stays alive while callbacks are registered
-                        let eth = &mut *(eth_ptr as *mut EthDriver<'static, RmiiEth>);
-                        if eth.is_connected().unwrap_or(false) {
-                            eth.send(frame.as_slice())?;
-                        } else {
-                            log::debug!("Ethernet not connected!");
-                        }
-                        Ok(())
-                    }
-                },
-                |_, _, _| {},
-            )
-            .expect("Failed to set Wi-Fi callbacks!");
+            core::ptr::copy_nonoverlapping(buf.add(6), mac.as_mut_ptr(), mac.len());
         }
-
-        let wifi_ptr = &mut *wifi as *mut WifiDriver<'static> as usize;
-        unsafe {
-            eth.set_nonstatic_rx_callback({
-                let wifi_ptr = wifi_ptr;
-                move |frame| {
-                    // SAFETY: wifi stays alive while callbacks are registered
-                    let wifi = &mut *(wifi_ptr as *mut WifiDriver<'static>);
-                    if wifi.is_connected().unwrap_or(false) {
-                        let _ = wifi.send(WifiDeviceId::Sta, frame.as_slice());
-                    } else {
-                        log::debug!("Wi-Fi not connected!");
-                    }
-                }
-            })
-            .expect("Failed to set Ethernet callback!");
-        }
-
-        wifi.start().expect("Failed to start Wi-Fi!");
-        eth.start().expect("Failed to start Ethernet!");
-
-        wifi.connect().expect("Failed to connect to Wi-Fi!");
-
-        Self {
-            state: Running {
-                _eth: eth,
-                _wifi: wifi,
-            },
+        if CLIENT_MAC.set(mac).is_ok() {
+            log::warn!("Sniffed client MAC: {}", mac2str(mac));
         }
     }
+
+    let guard = TO_WIFI.try_enter();
+    if guard.is_some() {
+        if let Ok(len) = u16::try_from(len) {
+            // SAFETY: the gate keeps Wi-Fi initialized until return and
+            // serializes transmitters. ESP-IDF v5.3.3 copies the valid Ethernet
+            // buffer synchronously, without retaining it. Not-ready/disconnected
+            // states are handled by the transmit API's error return.
+            unsafe {
+                sys::esp_wifi_internal_tx(WifiDeviceId::Sta.into(), buf.cast(), len);
+            }
+        }
+    }
+    // SAFETY: Ethernet transfers ownership of this malloc-allocated RX buffer to
+    // the input callback. Free exactly once, also on closed/failed transmit.
+    unsafe {
+        sys::free(buf.cast());
+    }
+    ESP_OK
+}
+
+unsafe extern "C" fn forward_to_eth(buf: *mut c_void, len: u16, eb: *mut c_void) -> esp_err_t {
+    let guard = TO_ETH.try_enter();
+    if guard.is_some() {
+        // SAFETY: ESP-IDF supplies a valid RX buffer of len bytes. Admission
+        // publishes a live C handle and prevents its destruction until return.
+        // Only one sender enters this direction; RMII transmit copies into DMA
+        // buffers before returning and does not retain buf. No Rust driver
+        // reference (mutable or shared) is constructed.
+        unsafe {
+            sys::esp_eth_transmit(ETH_HANDLE.load(Ordering::Relaxed), buf, usize::from(len));
+        }
+    }
+    // SAFETY: RX ownership transfers to this callback. Free eb exactly once,
+    // after synchronous transmit (also when closed or transmit fails). Returning
+    // ESP_OK tells ESP-IDF the frame was consumed. No slice or TX callback needed.
+    unsafe {
+        sys::esp_wifi_internal_free_rx_buffer(eb);
+    }
+    ESP_OK
 }
 
 /// Format MAC bytes as a hex string.

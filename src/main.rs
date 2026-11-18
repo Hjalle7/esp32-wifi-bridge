@@ -6,6 +6,7 @@
 use esp_idf_svc::hal::delay;
 
 mod bridge;
+mod callback_gate;
 #[allow(clippy::wildcard_imports)]
 use bridge::*;
 
