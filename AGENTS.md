@@ -5,7 +5,7 @@
 - These instructions apply only to `Hjalle7/esp32-wifi-bridge` (Rust).
 - Prioritize reliability, security, simplicity, and maintainability.
 - Preserve the single-client Ethernet-to-WiFi forwarding architecture in `src/bridge.rs`: learn the source MAC from the first Ethernet frame, clone it onto the WiFi station, and forward frames in both directions. Preserve the `Idle -> EthReady -> WifiReady -> Running` lifecycle; do not introduce routing, NAT, or multi-client behavior without an explicit request.
-- Target WT32-ETH01 (ESP32, 4 MB flash). Respect the existing LAN87XX RMII pin, clock, and PHY configuration and account for flash/RAM limits.
+- Target WT32-ETH01 (ESP32, including 4 MB boards and the verified 8 MB V1.4 unit). Respect the existing LAN87XX RMII pin, clock, and PHY configuration and account for flash/RAM limits.
 
 ## Build context
 
@@ -19,7 +19,7 @@
 
 - Require automatic WiFi reconnection, watchdog supervision, and recovery from initialization failures in runtime development. These are development requirements, not assertions that the current code implements them: startup uses `expect`/`unwrap`, WiFi connects once, and `main` only idles afterward; application-level recovery and watchdog supervision are not implemented in the inspected source. Address gaps within the requested task's scope; do not add functionality to documentation-only changes.
 - Review every unsafe block and callback change for ownership, buffer lifetimes, stable driver addresses, callback registration/unregistration and drop order, aliasing, and concurrent access. Callbacks use static gates, a static RMII MAC mediator, and an atomic C Ethernet handle; they do not capture raw Rust driver pointers or reconstruct driver references. Preserve RX-only WiFi registration (avoiding the defective svc TX wrapper), gate draining, explicit WiFi RX unregister before destruction, and WiFi-before-Ethernet drop order. Follow the version-specific contracts and retained RMII resource limitation in `SAFETY.md`; gates alone do not join RX callbacks.
-- Minimal UART diagnostics, including RSSI and connection/disconnection events, are allowed. Keep them lightweight and free of secrets. `log` currently uses `release_max_level_off`; do not claim release diagnostics exist without verifying the configuration.
+- Minimal UART diagnostics, including RSSI and connection/disconnection events, are allowed. Keep them lightweight and free of secrets. `log` currently uses `release_max_level_warn` for the hardware baseline. Keep packet callbacks free of logging.
 
 ## Feature boundaries
 
