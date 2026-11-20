@@ -33,7 +33,7 @@ std = ["alloc", "esp-idf-svc/binstart", "esp-idf-svc/std"]
 alloc = ["esp-idf-svc/alloc"]
 
 [dependencies]
-log = { version = "0.4", default-features = false, features = ["release_max_level_off"] }
+log = { version = "0.4", default-features = false, features = ["release_max_level_warn"] }
 # min binary size
 #log = { version = "0.4", default-features = false, features = ["max_level_off"] }
 esp-idf-svc = "0.50"
