@@ -62,6 +62,10 @@ layout. The single factory app ends at 0x110000 (exclusive), within the SDK's
 2 MB header limit and the physical 8 MB flash. The SDK may report the larger
 detected size and use the header size.
 
+The Linux baseline with ESP Rust 1.85.0.0, ESP-IDF v5.3.3 and the dummy
+credentials above produced a **774,256-byte** application with **274,320 bytes
+free**. Recheck the size after building with the bench credentials.
+
 | Offset | Contents | Size or limit |
 | --- | --- | --- |
 | 0x1000 | Second-stage bootloader | Up to 0x7000 bytes before the table |
@@ -126,7 +130,7 @@ Sustained traffic, link-loss recovery and watchdog behavior remain unverified.
 
 ## Performance
 
-In my testing, approximately 50 Mbps symmetrical throughput can be attained.
+The original project reported approximately 50 Mbps in each direction. Throughput on the V1.4 bench unit still needs measurement.
 
 ### Coding Style
 
