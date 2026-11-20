@@ -24,15 +24,17 @@ WIFI_SSID=bridge-validation WIFI_PASS=validation-only cargo build --release --lo
 ```
 
 For association testing, rebuild locally with a dedicated 2.4 GHz WPA2-Personal
-test AP's credentials. In Bash on macOS, read them without putting them in shell
-history. The resulting ELF and application image contain these values. Keep
+test AP's credentials. In zsh on macOS, enter them at the prompts to keep them
+out of shell history. The passphrase prompt hides what you type. The resulting
+ELF and application image contain these values. Keep
 `target/`, `.embuild/`, generated SDK configuration and the backup private.
 
-```bash
-read -r -p 'Test SSID: ' WIFI_SSID
-read -r -s -p 'Test passphrase: ' WIFI_PASS
-echo
-WIFI_SSID="$WIFI_SSID" WIFI_PASS="$WIFI_PASS" cargo build --release --locked
+```zsh
+if IFS= read -r 'WIFI_SSID?Test SSID: ' &&
+   IFS= read -rs 'WIFI_PASS?Test passphrase: '; then
+  printf '\n'
+  WIFI_SSID="$WIFI_SSID" WIFI_PASS="$WIFI_PASS" cargo build --release --locked
+fi
 unset WIFI_SSID WIFI_PASS
 ```
 
