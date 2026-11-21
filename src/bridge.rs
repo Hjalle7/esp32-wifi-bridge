@@ -264,11 +264,6 @@ impl From<Bridge<WifiReady>> for Bridge<Running> {
         running.eth.start().expect("Failed to start Ethernet!");
         running.wifi.connect().expect("Failed to connect to Wi-Fi!");
 
-        // The IDF EMAC driver logs each descriptor failure. Use the interval
-        // counters once forwarding starts to avoid serial I/O on that path.
-        esp_idf_svc::log::set_target_level("esp.emac", log::LevelFilter::Off)
-            .expect("Failed to set EMAC log level!");
-
         // Release/acquire admission publishes the handle only after both drivers
         // are owned and started. Neither callback accesses the Rust driver values.
         TO_WIFI.open();

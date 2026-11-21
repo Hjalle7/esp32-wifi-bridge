@@ -169,8 +169,6 @@ rejections. Link events can lag a TX failure or occur between samples. `ESP_OK`
 measures driver acceptance. These counters cannot see delivery on the wire,
 descriptor occupancy, or drops before the forwarding callbacks. Ethernet RX
 lengths that cannot be passed to the Wi-Fi API are outside its TX counters.
-During forwarding, the `esp.emac` SDK log tag is silenced to prevent repeated
-per-packet UART output. This also hides other messages from that tag.
 
 ## Performance
 
