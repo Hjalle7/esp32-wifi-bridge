@@ -16,6 +16,8 @@ pub mod sys {
         pub phy_reg_read: Option<unsafe extern "C" fn()>,
         pub phy_reg_write: Option<unsafe extern "C" fn()>,
         pub stack_input: Option<unsafe extern "C" fn(*mut Self, *mut u8, u32) -> esp_err_t>,
+        pub stack_input_info:
+            Option<unsafe extern "C" fn(*mut Self, *mut u8, u32, *mut c_void) -> esp_err_t>,
         pub on_state_changed:
             Option<unsafe extern "C" fn(*mut Self, esp_eth_state_t, *mut c_void) -> esp_err_t>,
     }
@@ -45,12 +47,16 @@ pub mod sys {
 
 mod bridge {
     use super::sys;
+    use core::ffi::c_void;
+
     pub unsafe extern "C" fn forward_to_wifi(
         _mediator: *mut sys::esp_eth_mediator_t,
         buf: *mut u8,
         len: u32,
+        info: *mut c_void,
     ) -> sys::esp_err_t {
         assert_eq!(len, 1);
+        assert!(info.is_null());
         // The stub callback consumes a caller-owned byte without a driver.
         unsafe { *buf += 1 };
         sys::ESP_OK
@@ -91,7 +97,9 @@ fn rx_dispatch_can_start_after_driver_storage_is_freed() {
     // Model the outstanding RMII task dispatching only after uninstall. This
     // would dereference freed storage with the original driver-owned mediator.
     let mut byte = 0;
-    let result = unsafe { (*input).stack_input.unwrap()(input, &mut byte, 1) };
+    assert!(unsafe { (*input).stack_input.is_none() });
+    let result =
+        unsafe { (*input).stack_input_info.unwrap()(input, &mut byte, 1, core::ptr::null_mut()) };
     assert_eq!(result, sys::ESP_OK);
     assert_eq!(byte, 1);
 }

@@ -4,7 +4,7 @@
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use esp_idf_svc::sys::{esp_err_t, ESP_ERR_INVALID_STATE, ESP_ERR_NO_MEM, ESP_OK};
 
-// Verified ESP-IDF v5.3.3 release sdkconfig, also set in sdkconfig.defaults.
+// Verified ESP-IDF v6.1.1 release sdkconfig, also set in sdkconfig.defaults.
 const DMA_BUFFER_BYTES: u16 = 1522;
 const DMA_TX_CAPACITY_BYTES: u16 = DMA_BUFFER_BYTES * 30;
 // Store the minimum and maximum together so the reporter sees a coherent pair.

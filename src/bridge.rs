@@ -4,16 +4,18 @@ extern crate alloc;
 use alloc::{format, string::String};
 use core::{
     ffi::c_void,
-    sync::atomic::{AtomicPtr, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, Ordering},
+    time::Duration,
 };
 
 use esp_idf_svc::{
     eth::{EthDriver, RmiiClockConfig, RmiiEth, RmiiEthChipset},
     eventloop::EspSystemEventLoop,
-    hal::{delay::FreeRtos, gpio, modem::Modem, prelude::Peripherals},
+    hal::{delay::FreeRtos, modem::Modem, peripherals::Peripherals},
     handle::RawHandle,
     nvs::EspDefaultNvsPartition,
     sys::{self, esp, esp_err_t, ESP_OK},
+    timer::EspTaskTimerService,
     wifi::{AuthMethod, ClientConfiguration, Configuration, WifiDeviceId, WifiDriver},
 };
 
@@ -59,7 +61,7 @@ pub struct Idle {
 /// At some point after we have sniffed `client_mac` (not necessarily immediately), we stop
 /// sniffing future frames.
 pub struct EthReady {
-    modem: Modem,
+    modem: Modem<'static>,
     sysloop: EspSystemEventLoop,
     nvs: Option<EspDefaultNvsPartition>,
     eth: EthDriver<'static, RmiiEth>,
@@ -99,9 +101,8 @@ impl Drop for Running {
         esp!(unsafe { sys::esp_wifi_internal_reg_rxcb(WifiDeviceId::Sta.into(), None) })
             .expect("Failed to unregister Wi-Fi RX callback!");
         ETH_HANDLE.store(core::ptr::null_mut(), Ordering::Relaxed);
-        // This drains transmitters, not callbacks paused before admission.
-        // Wi-Fi stop/unregister synchronize with its task. Late RMII dispatch
-        // uses a static MAC mediator, independent of the uninstalled driver.
+        stop_ethernet(&mut self.eth);
+        // Late RMII RX dispatch uses the static mediator after driver uninstall.
     }
 }
 
@@ -143,18 +144,16 @@ impl From<Bridge<Idle>> for Bridge<EthReady> {
         let pins = val.state.peripherals.pins;
         let mut eth = EthDriver::new_rmii(
             val.state.peripherals.mac,
-            pins.gpio25, // RMII RDX0
-            pins.gpio26, // RMII RDX1
-            pins.gpio27, // RMII CRS DV
-            pins.gpio23, // WT32-ETH01 SMI MDC
-            pins.gpio22, // EMII TXD1
-            pins.gpio21, // RMII TX EN
-            pins.gpio19, // RMII TXD0
-            pins.gpio18, // WT32-ETH01 SMI MDIO
-            RmiiClockConfig::<gpio::Gpio0, gpio::Gpio16, gpio::Gpio17>::Input(
-                pins.gpio0, // WT32-ETH01 external clock
-            ),
-            Some(pins.gpio16), // WT32-ETH01 PHY reset
+            pins.gpio25,                        // RMII RDX0
+            pins.gpio26,                        // RMII RDX1
+            pins.gpio27,                        // RMII CRS DV
+            pins.gpio23,                        // WT32-ETH01 SMI MDC
+            pins.gpio22,                        // EMII TXD1
+            pins.gpio21,                        // RMII TX EN
+            pins.gpio19,                        // RMII TXD0
+            pins.gpio18,                        // WT32-ETH01 SMI MDIO
+            RmiiClockConfig::Input(pins.gpio0), // WT32-ETH01 external clock
+            Some(pins.gpio16),                  // WT32-ETH01 PHY reset
             RmiiEthChipset::LAN87XX,
             Some(1), // WT32-ETH01 PHY address
             val.state.sysloop.clone(),
@@ -164,7 +163,7 @@ impl From<Bridge<Idle>> for Bridge<EthReady> {
         // SAFETY: initialized ESP32 RMII, never started, no low-level hooks.
         // A static input function alone is insufficient: the default dispatcher
         // dereferences a driver-owned mediator before calling it. The RX task
-        // outlives driver uninstall in esp-idf-svc 0.50.1. See SAFETY.md.
+        // outlives driver uninstall in esp-idf-svc 0.53.0. See SAFETY.md.
         esp!(unsafe { crate::ethernet_rx::install(eth.handle()) })
             .expect("Failed to set Ethernet RX callback!");
 
@@ -173,8 +172,7 @@ impl From<Bridge<Idle>> for Bridge<EthReady> {
         let client_mac = *CLIENT_MAC.wait();
         log::warn!("Sniffed client MAC: {}", mac2str(client_mac));
 
-        eth.stop()
-            .expect("Failed to stop Ethernet after MAC sniffing!");
+        stop_ethernet(&mut eth);
 
         log::warn!("Setting Ethernet promiscuous...");
         eth.set_promiscuous(true)
@@ -253,7 +251,7 @@ impl From<Bridge<WifiReady>> for Bridge<Running> {
 
         // SAFETY: Client-only Wi-Fi is initialized and stopped. The callback is a
         // static function with no borrowed environment. Running owns teardown.
-        // Deliberately register RX only: esp-idf-svc 0.50.1's TX wrapper creates
+        // Deliberately register RX only: esp-idf-svc 0.53.0's TX wrapper creates
         // an invalid slice even with an empty callback; we never install it.
         esp!(unsafe {
             sys::esp_wifi_internal_reg_rxcb(WifiDeviceId::Sta.into(), Some(forward_to_eth))
@@ -297,6 +295,7 @@ pub unsafe extern "C" fn forward_to_wifi(
     _mediator: *mut sys::esp_eth_mediator_t,
     buf: *mut u8,
     len: u32,
+    _info: *mut c_void,
 ) -> esp_err_t {
     if CLIENT_MAC.get().is_none() && len >= 12 {
         let mut mac = [0; 6];
@@ -312,7 +311,7 @@ pub unsafe extern "C" fn forward_to_wifi(
     if guard.is_some() {
         if let Ok(len) = u16::try_from(len) {
             // SAFETY: the gate keeps Wi-Fi initialized until return and
-            // serializes transmitters. ESP-IDF v5.3.3 copies the valid Ethernet
+            // serializes transmitters. ESP-IDF v6.1.1 copies the valid Ethernet
             // buffer synchronously, without retaining it. Not-ready/disconnected
             // states are handled by the transmit API's error return.
             let result =
@@ -346,12 +345,38 @@ unsafe extern "C" fn forward_to_eth(buf: *mut c_void, len: u16, eb: *mut c_void)
         ETH_TX.reject();
     }
     // SAFETY: RX ownership transfers to this callback. Free eb exactly once,
-    // after synchronous transmit (also when closed or transmit fails). Returning
-    // ESP_OK tells ESP-IDF the frame was consumed. No slice or TX callback needed.
+    // after synchronous transmit (also when closed or transmit fails). The STA
+    // dispatch paths leave recycling to this callback. No slice or TX callback.
     unsafe {
         sys::esp_wifi_internal_free_rx_buffer(eb);
     }
     ESP_OK
+}
+
+/// Stop Ethernet and wait for any outstanding SDK link check on the timer task.
+fn stop_ethernet(eth: &mut EthDriver<'_, RmiiEth>) {
+    static LINK_TIMER_DRAINED: AtomicBool = AtomicBool::new(false);
+
+    eth.stop().expect("Failed to stop Ethernet!");
+
+    // Only the bridge owner calls this. ESP-IDF disarms the link timer in
+    // stop() without joining a check already dispatched on the timer task.
+    // A one-shot on the same serialized task runs after that check returns.
+    LINK_TIMER_DRAINED.store(false, Ordering::Relaxed);
+    let timer = EspTaskTimerService::new()
+        .and_then(|service| service.timer(|| LINK_TIMER_DRAINED.store(true, Ordering::Release)))
+        .expect("Failed to create Ethernet link-check barrier!");
+    timer
+        .after(Duration::from_micros(1))
+        .expect("Failed to schedule Ethernet link-check barrier!");
+    while !LINK_TIMER_DRAINED.load(Ordering::Acquire) {
+        FreeRtos::delay_ms(1);
+    }
+
+    // SAFETY: the timer is live and this owner runs outside the timer task.
+    // Join the one-shot itself before dropping its callback storage.
+    esp!(unsafe { sys::esp_timer_stop_blocking(timer.handle(), u32::MAX) })
+        .expect("Failed to join Ethernet link-check barrier!");
 }
 
 /// Format MAC bytes as a hex string.

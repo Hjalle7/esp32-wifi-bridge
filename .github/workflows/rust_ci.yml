@@ -31,7 +31,6 @@ jobs:
 
   rust-checks:
     name: Rust Checks
-    # ESP-IDF v5.3.3's esp-clang requires the libxml2.so.2 ABI.
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -44,8 +43,8 @@ jobs:
           - command: clippy
             args: --locked --all-targets --all-features --workspace -- -D warnings
     env:
-      WIFI_SSID: My Awesome Network
-      WIFI_PASS: hunter2
+      WIFI_SSID: bridge-validation
+      WIFI_PASS: validation-only
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -56,6 +55,7 @@ jobs:
       - name: Setup Rust
         uses: esp-rs/xtensa-toolchain@v1.5
         with:
+          version: '1.97.0.0'
           default: true
           buildtargets: esp32
           ldproxy: true
