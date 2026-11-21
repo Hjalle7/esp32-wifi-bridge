@@ -8,7 +8,8 @@ The bench board has an ESP32-D0WD-V3 revision 3.1 and 8 MB SPI flash. Factory
 boot, CP2102 communication, flash identification and a full factory backup
 were confirmed before this test. Running the Rust bridge on the board is pending.
 
-The target is `xtensa-esp32-espidf` with ESP-IDF v5.3.3. The LAN87XX driver
+The target is `xtensa-esp32-espidf` with ESP-IDF v6.1.1 and ESP Rust 1.97.0.0.
+The build pins Espressif's LAN87XX v1.1.0 component by Git commit. The driver
 uses PHY address 1, MDC on GPIO23, MDIO on GPIO18 and external 50 MHz RMII
 clock input on GPIO0. The driver uses GPIO16 as its PHY reset output, which
 enables the board's clock oscillator. RXD0/RXD1/CRS_DV use GPIO25/26/27 and
@@ -16,8 +17,14 @@ TXD0/TXD1/TX_EN use GPIO19/22/21. [WT32-ETH01 hardware reference](https://github
 
 ### Build and check the flash images
 
-Use a shell with the project's ESP Rust toolchain, `ldproxy` and ESP-IDF build
-prerequisites available. Run from the repository root. For a build-only check:
+Install ESP Rust 1.97.0.0 as `esp` (for example, with
+`espup install --toolchain-version 1.97.0.0 --targets esp32`) and make its
+environment, `ldproxy`, and the ESP-IDF build prerequisites available.
+Cargo selects the v6.1.1 tag when it manages the SDK. If you activate an
+external SDK checkout, verify `idf.py --version` reports v6.1.1. In Codex,
+follow the activation and Python checks in [AGENTS.md](AGENTS.md).
+
+Run the build-only check from the repository root with dummy credentials.
 
 ```sh
 WIFI_SSID=bridge-validation WIFI_PASS=validation-only cargo build --release --locked
@@ -40,33 +47,37 @@ unset WIFI_SSID WIFI_PASS
 
 The configured `cargo run --release` runner is `espflash flash --monitor`.
 For this CP2102 procedure, use the release ELF and the bootloader and partition
-table that `esp-idf-sys` places alongside it. With the Python 3.13.17
-environment containing esptool 5.6.0 active, run:
+table that `esp-idf-sys` places alongside it. With the ESP-IDF Python
+environment containing esptool 5.6.0 active, run the image and partition checks.
 
 ```sh
 python3 -m esptool version
-out=target/xtensa-esp32-espidf/release
+out=${CARGO_TARGET_DIR:-target}/xtensa-esp32-espidf/release
 python3 -m esptool --chip esp32 elf2image --flash-mode dio --flash-freq 40m \
   --flash-size 2MB --min-rev-full 0 --max-rev-full 399 --elf-sha256-offset 0xb0 \
   -o "$out/bridge.bin" "$out/esp32-wifi-bridge"
 python3 -m esptool --chip esp32 image-info "$out/bridge.bin"
-pt=.embuild/espressif/esp-idf/v5.3.3/components/partition_table
+pt=${IDF_PATH:-.embuild/espressif/esp-idf/v6.1.1}/components/partition_table
 python3 "$pt/gen_esp32part.py" "$out/partition-table.bin"
+python3 "$pt/check_sizes.py" --offset 0x8000 bootloader 0x1000 "$out/bootloader.bin"
 python3 "$pt/check_sizes.py" partition --type app --subtype factory \
   "$out/partition-table.bin" "$out/bridge.bin"
 wc -c "$out/bridge.bin"
 ```
 
-For an activated external IDF checkout, use its `components/partition_table`
-directory for `pt`. Check the image digest, revision range and the decoded
-table before flashing. Stop if a command fails or the output differs from this
+Check the image digest, revision range and decoded table before flashing.
+Stop if a command fails or the output differs from this
 layout. The single factory app ends at 0x110000 (exclusive), within the SDK's
 2 MB header limit and the physical 8 MB flash. The SDK may report the larger
 detected size and use the header size.
 
-The Linux baseline with ESP Rust 1.85.0.0, ESP-IDF v5.3.3 and the dummy
-credentials above produced a **774,256-byte** application with **274,320 bytes
-free**. Recheck the size after building with the bench credentials.
+The Linux release build with ESP Rust 1.97.0.0, ESP-IDF v6.1.1 and the dummy
+credentials above produced a **962,864-byte** application with **85,712 bytes
+free** in the factory partition. The 25,904-byte bootloader leaves 2,768
+bytes before the partition table. The historical Linux build at `844f4c5`
+used ESP Rust 1.85.0.0 and ESP-IDF v5.3.3. It produced a 774,256-byte
+application with 274,320 bytes free and predates the TX diagnostics. Recheck
+the image sizes after building with the bench credentials.
 
 | Offset | Contents | Size or limit |
 | --- | --- | --- |

@@ -1,0 +1,24 @@
+dependencies:
+  espressif/lan87xx:
+    component_hash: 1a93f8e96278035442b72d12ba194ba8f05ff38ac0864b6d842f62dc3b98f765
+    dependencies:
+    - name: idf
+      version: '>=6.0'
+    source:
+      git: https://github.com/espressif/esp-eth-drivers.git
+      path: lan87xx
+      type: git
+    targets:
+    - esp32
+    - esp32p4
+    - esp32s31
+    version: b30d137564452f5a8cfa02d5855df1a69a3d82cf
+  idf:
+    source:
+      type: idf
+    version: 6.1.1
+direct_dependencies:
+- espressif/lan87xx
+manifest_hash: f3b8391d3ddfbd8df9ce1d42116386c474c6335381474ad9df701bd92afe0886
+target: esp32
+version: 3.0.0
