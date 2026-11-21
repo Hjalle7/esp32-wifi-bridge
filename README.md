@@ -124,11 +124,53 @@ screen /dev/cu.usbserial-0001 115200
    counts for both directions. On macOS, `ipconfig getpacket enX`, `arp -an`
    and `ping -c 5 <IPv4-address>` are useful; select the wired interface.
 
-CI runs formatting, Clippy, 8 callback-gate tests, 3 mediator ABI-stub tests
-and a locked release build with dummy credentials. The UART sequence and
-network checks above are expected observations pending a board run. Startup
-failures can panic, Wi-Fi connects once, and transmit errors are silent.
+CI runs formatting, Clippy, 8 callback-gate tests, 3 mediator ABI-stub tests,
+3 TX diagnostics tests and a locked release build with dummy credentials.
+Startup failures can panic and Wi-Fi connects once.
 Sustained traffic, link-loss recovery and watchdog behavior remain unverified.
+
+### Ethernet and Wi-Fi TX diagnostics
+
+Once the bridge reaches `Running`, the serial monitor shows one `bridge.tx`
+line about every second, including idle intervals. This example omits the log
+prefix.
+
+```text
+eth link=up attempts=814 ok=808 no_mem=6 link_down=0 other=0 gate=0 no_mem_len_buckets=[6, 0, 0] no_mem_len_min_max=Some((64, 1514)) | wifi attempts=263 ok=263 failed=0 gate=0
+```
+
+| Field | Meaning |
+| --- | --- |
+| `attempts`, `ok` | Completed TX API calls and calls returning `ESP_OK`, respectively, for each direction. |
+| Ethernet `no_mem`, `link_down`, `other` | Calls returning `ESP_ERR_NO_MEM`, `ESP_ERR_INVALID_STATE` (link down at transmit), or any other error. |
+| `no_mem_len_buckets` | Counts of Ethernet `ESP_ERR_NO_MEM` frames in the inclusive size buckets ≤1522, 1523–45660, and >45660 bytes, in that order. The verified TX ring has 30 buffers of 1522 bytes each. |
+| `no_mem_len_min_max` | Smallest and largest `ESP_ERR_NO_MEM` frame lengths in bytes since boot. `None` means no such failures observed so far. |
+| Wi-Fi `failed` | Calls returning any error from the Wi-Fi TX API. |
+| `gate` | Frames rejected by that direction's forwarding gate while closed or busy, including Ethernet frames seen during MAC learning in the first Wi-Fi report. These frames do not enter `attempts`. |
+| Ethernet `link` | Event-based link state sampled at report time. Speed and duplex are omitted. |
+
+On the WT32-ETH01, use the release build and 115200 8N1 monitor procedure above.
+Complete the DHCP and IPv4 checks with one wired client, then capture 30 seconds
+of quiet traffic. From a second host on the test LAN, send several short bursts
+toward the wired client, for example by running `iperf3 -s` on the wired client
+and `iperf3 -c <wired-client-ip> -t 5` on the second host. Leave quiet intervals
+between bursts. Repeat while disconnecting and reconnecting Ethernet and mark
+the times in the serial capture. Reset the bridge before switching wired clients.
+
+Compare `no_mem / attempts` and the size buckets across quiet, burst and
+reconnect intervals. `no_mem` concentrated in the smallest bucket during bursts
+is consistent with temporary descriptor exhaustion. Larger frames can require
+multiple buffers, and frames over 45660 bytes exceed the ring's configured byte
+capacity. `link_down` during a cable pull identifies a different TX result.
+
+Each counter is drained independently, so traffic at a reporting boundary can
+land in either adjacent interval. The first interval can include startup gate
+rejections. Link events can lag a TX failure or occur between samples. `ESP_OK`
+measures driver acceptance. These counters cannot see delivery on the wire,
+descriptor occupancy, or drops before the forwarding callbacks. Ethernet RX
+lengths that cannot be passed to the Wi-Fi API are outside its TX counters.
+During forwarding, the `esp.emac` SDK log tag is silenced to prevent repeated
+per-packet UART output. This also hides other messages from that tag.
 
 ## Performance
 
