@@ -20,6 +20,7 @@ use esp_idf_svc::{
 use once_cell::sync::OnceCell;
 
 use crate::callback_gate::CallbackGate;
+use crate::tx_diagnostics::{EthernetTxCounters, WifiTxCounters};
 
 // ESP-IDF Wi-Fi and Peripherals::take() are singletons. Callbacks use only these
 // static gates and the C Ethernet handle, never a pointer/reference to a Rust driver.
@@ -27,6 +28,8 @@ static TO_WIFI: CallbackGate = CallbackGate::new();
 static TO_ETH: CallbackGate = CallbackGate::new();
 static ETH_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
 static CLIENT_MAC: OnceCell<[u8; 6]> = OnceCell::new();
+static ETH_TX: EthernetTxCounters = EthernetTxCounters::new();
+static WIFI_TX: WifiTxCounters = WifiTxCounters::new();
 
 const SSID: &str = env!("WIFI_SSID");
 const PASS: &str = env!("WIFI_PASS");
@@ -270,6 +273,26 @@ impl From<Bridge<WifiReady>> for Bridge<Running> {
     }
 }
 
+impl Bridge<Running> {
+    pub fn report_tx_diagnostics(&self) {
+        let link = match self.state.eth.is_connected() {
+            Ok(true) => "up",
+            Ok(false) => "down",
+            Err(_) => "unknown",
+        };
+        let eth = ETH_TX.take_interval();
+        let wifi = WIFI_TX.take_interval();
+        log::warn!(
+            target: "bridge.tx",
+            "eth link={link} attempts={} ok={} no_mem={} link_down={} other={} gate={} \
+             no_mem_len_buckets={:?} no_mem_len_min_max={:?} | wifi attempts={} ok={} failed={} gate={}",
+            eth.attempts(), eth.ok, eth.no_mem(), eth.link_down, eth.other, eth.gate,
+            eth.no_mem_len_buckets, ETH_TX.no_mem_len_range(),
+            wifi.attempts(), wifi.ok, wifi.failed, wifi.gate,
+        );
+    }
+}
+
 pub unsafe extern "C" fn forward_to_wifi(
     _mediator: *mut sys::esp_eth_mediator_t,
     buf: *mut u8,
@@ -292,10 +315,12 @@ pub unsafe extern "C" fn forward_to_wifi(
             // serializes transmitters. ESP-IDF v5.3.3 copies the valid Ethernet
             // buffer synchronously, without retaining it. Not-ready/disconnected
             // states are handled by the transmit API's error return.
-            unsafe {
-                sys::esp_wifi_internal_tx(WifiDeviceId::Sta.into(), buf.cast(), len);
-            }
+            let result =
+                unsafe { sys::esp_wifi_internal_tx(WifiDeviceId::Sta.into(), buf.cast(), len) };
+            WIFI_TX.record(result);
         }
+    } else {
+        WIFI_TX.reject();
     }
     // SAFETY: Ethernet transfers ownership of this malloc-allocated RX buffer to
     // the input callback. Free exactly once, also on closed/failed transmit.
@@ -313,9 +338,12 @@ unsafe extern "C" fn forward_to_eth(buf: *mut c_void, len: u16, eb: *mut c_void)
         // Only one sender enters this direction; RMII transmit copies into DMA
         // buffers before returning and does not retain buf. No Rust driver
         // reference (mutable or shared) is constructed.
-        unsafe {
-            sys::esp_eth_transmit(ETH_HANDLE.load(Ordering::Relaxed), buf, usize::from(len));
-        }
+        let result = unsafe {
+            sys::esp_eth_transmit(ETH_HANDLE.load(Ordering::Relaxed), buf, usize::from(len))
+        };
+        ETH_TX.record(result, len);
+    } else {
+        ETH_TX.reject();
     }
     // SAFETY: RX ownership transfers to this callback. Free eb exactly once,
     // after synchronous transmit (also when closed or transmit fails). Returning

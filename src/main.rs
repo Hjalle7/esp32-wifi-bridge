@@ -8,6 +8,7 @@ use esp_idf_svc::hal::delay;
 mod bridge;
 mod callback_gate;
 mod ethernet_rx;
+mod tx_diagnostics;
 #[allow(clippy::wildcard_imports)]
 use bridge::*;
 
@@ -22,10 +23,10 @@ fn main() {
     let idle = Bridge::new();
     let ethup = Bridge::<EthReady>::from(idle);
     let wifiup = Bridge::<WifiReady>::from(ethup);
-    let _running = Bridge::<Running>::from(wifiup);
+    let running = Bridge::<Running>::from(wifiup);
 
-    // TODO
     loop {
         delay::FreeRtos::delay_ms(1000);
+        running.report_tx_diagnostics();
     }
 }
