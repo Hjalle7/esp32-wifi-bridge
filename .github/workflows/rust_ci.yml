@@ -62,4 +62,35 @@ jobs:
       - name: Enable caching
         uses: Swatinem/rust-cache@v2
       - name: Run command
+        if: matrix.action.command != 'build'
         run: cargo ${{ matrix.action.command }} ${{ matrix.action.args }}
+      - name: Build locked release
+        if: matrix.action.command == 'build'
+        run: cargo build --release --locked --message-format=json-render-diagnostics > "$RUNNER_TEMP/bridge-build.jsonl"
+      - name: Check application and bootloader images
+        if: matrix.action.command == 'build'
+        run: |
+          build_log="$RUNNER_TEMP/bridge-build.jsonl"
+          elf=$(jq -er 'select(.reason == "compiler-artifact" and .target.name == "esp32-wifi-bridge" and .executable != null) | .executable' "$build_log")
+          out=$(dirname "$elf")
+          # Reuse the SDK and Python environment from this Cargo build.
+          idf_out=$(jq -er 'select(.reason == "build-script-executed" and (.package_id | split("#") | last | startswith("esp-idf-sys@"))) | .out_dir' "$build_log")
+          build_info="$idf_out/esp-idf-build.json"
+          python=$(jq -er '.venv_python' "$build_info")
+          pt="$(jq -er '.esp_idf_dir' "$build_info")/components/partition_table"
+          flash_args="$(jq -er '.build_dir' "$build_info")/flasher_args.json"
+          bootloader_offset=$(jq -er '.bootloader.offset' "$flash_args")
+          table_offset=$(jq -er '.["partition-table"].offset' "$flash_args")
+          "$python" -m esptool --chip esp32 elf2image --flash-mode dio --flash-freq 40m \
+            --flash-size 2MB --min-rev-full 0 --max-rev-full 399 --elf-sha256-offset 0xb0 \
+            -o "$out/bridge.bin" "$elf"
+          factory_size=$("$python" "$pt/parttool.py" --partition-table-offset "$table_offset" \
+            --partition-table-file "$out/partition-table.bin" get_partition_info \
+            --partition-type app --partition-subtype factory --info size)
+          if [[ -z "$factory_size" ]]; then
+            echo "The generated partition table has no factory application partition." >&2
+            exit 1
+          fi
+          "$python" "$pt/check_sizes.py" --offset "$table_offset" partition --type app --subtype factory \
+            "$out/partition-table.bin" "$out/bridge.bin"
+          "$python" "$pt/check_sizes.py" --offset "$table_offset" bootloader "$bootloader_offset" "$out/bootloader.bin"

@@ -72,7 +72,7 @@ layout. The single factory app ends at 0x110000 (exclusive), within the SDK's
 detected size and use the header size.
 
 The Linux release build with ESP Rust 1.97.0.0, ESP-IDF v6.1.1 and the dummy
-credentials above produced a **962,864-byte** application with **85,712 bytes
+credentials above produced a **963,008-byte** application with **85,568 bytes
 free** in the factory partition. The 25,904-byte bootloader leaves 2,768
 bytes before the partition table. The historical Linux build at `844f4c5`
 used ESP Rust 1.85.0.0 and ESP-IDF v5.3.3. It produced a 774,256-byte
@@ -137,6 +137,8 @@ screen /dev/cu.usbserial-0001 115200
 
 CI runs formatting, Clippy, 8 callback-gate tests, 3 mediator ABI-stub tests,
 3 TX diagnostics tests and a locked release build with dummy credentials.
+The release job converts the ELF with the esptool settings above and checks
+the factory application and bootloader sizes against the generated layout.
 Startup failures can panic and Wi-Fi connects once.
 Sustained traffic, link-loss recovery and watchdog behavior remain unverified.
 

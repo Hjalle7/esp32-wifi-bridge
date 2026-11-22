@@ -59,6 +59,28 @@ The retained RMII resources bound the bridge to a single firmware-lifetime
 instance. Adding driver recreation or MAC deletion would require a real RX
 task shutdown and join. Keep the mediator installed for the lifetime of the MAC.
 
+## Wi-Fi initialization
+
+The svc 0.53.0 constructor leaves `wifi_task_stack_size` zero. In the ESP32
+v6.1.1 archives, `pp_create_task` reads that field through
+`config_get_wifi_task_stack_size` and passes it to the SDK task-creation
+adapter. The generated SDK config enables WPA3 with nano formatting disabled,
+so `WIFI_TASK_STACK_SIZE` resolves to 6,656 bytes.
+
+The firmware links `WifiDriver::new`'s `esp_wifi_init` call through
+`components/wifi_init`. The C shim constructs the full
+`WIFI_INIT_CONFIG_DEFAULT()` initializer and copies the NVS enable flag from
+the svc configuration, preserving the bridge's fallback when NVS is
+unavailable. For this SDK configuration the other svc fields match the SDK
+defaults, including the disabled privacy enhancements and zero random-MAC
+reset interval. The shim checks the stack constant at compile time. The svc
+driver still owns initialization, event subscription and teardown.
+
+The [upstream fix](https://github.com/esp-rs/esp-idf/pull/610) is merged.
+Its monorepo revision brings newer HAL, sys and Ethernet code. Remove the
+shim and linker flag when adopting a compatible svc release with the fix.
+Wi-Fi startup and association still require WT32-ETH01 hardware validation.
+
 ## Wi-Fi dispatch and teardown
 
 The ESP32 SDK ships Wi-Fi as binary archives. The v6.1.1 Wi-Fi submodule pins

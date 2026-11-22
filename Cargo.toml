@@ -46,3 +46,6 @@ embuild = "0.33.7"
 # This commit is the upstream lan87xx@v1.1.0 release.
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/lan87xx", git = "https://github.com/espressif/esp-eth-drivers.git", path = "lan87xx", version = "b30d137564452f5a8cfa02d5855df1a69a3d82cf" }
+
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/wifi_init"]
