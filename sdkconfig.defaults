@@ -1,3 +1,4 @@
+# The Wi-Fi init component takes its task stack size from the SDK defaults.
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=64
 CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=64
