@@ -136,44 +136,78 @@ mod tests {
         let link = StationLink::new();
         let mut retry = WifiReconnect::new();
         let mut now = Duration::ZERO;
-        for attempt in 0..100 {
+        let outcomes = [
+            (false, true, false),
+            (false, false, true),
+            (true, false, false),
+            (true, true, false),
+            (true, false, true),
+        ];
+        for (rejected, disconnect_before_return, disconnect_after_return) in
+            outcomes.into_iter().cycle().take(100)
+        {
             assert!(retry.begin_attempt(&link, now));
             let returned = now + Duration::from_millis(100);
-            retry.attempt_returned(returned);
-            if attempt % 2 == 0 {
+            if disconnect_before_return {
                 link.set_associated(false);
-            } else {
+            }
+            retry.attempt_returned(returned);
+            if rejected {
                 link.connect_rejected();
             }
-            now = returned + RETRY_INTERVAL;
-            assert!(!retry.begin_attempt(&link, now - Duration::from_millis(1)));
+            if disconnect_after_return {
+                link.set_associated(false);
+            }
+            assert_eq!(link.state(), StationState::Disconnected);
+            now = returned + Duration::from_secs(5);
+            assert!(!retry.begin_attempt(&link, now - Duration::from_micros(1)));
         }
         assert!(retry.begin_attempt(&link, now));
     }
 
     #[test]
-    fn connect_rejection_preserves_an_early_association_event() {
-        let link = StationLink::new();
-        let mut retry = WifiReconnect::new();
-        assert!(retry.begin_attempt(&link, Duration::ZERO));
-        link.set_associated(true);
-        retry.attempt_returned(Duration::ZERO);
-        link.connect_rejected();
-        assert_eq!(link.state(), StationState::Connected);
-        assert!(!retry.begin_attempt(&link, RETRY_INTERVAL));
+    fn connect_return_preserves_an_early_association_event() {
+        for rejected in [false, true] {
+            let link = StationLink::new();
+            let mut retry = WifiReconnect::new();
+            assert!(retry.begin_attempt(&link, Duration::ZERO));
+            link.set_associated(true);
+
+            let returned = Duration::from_millis(100);
+            retry.attempt_returned(returned);
+            if rejected {
+                link.connect_rejected();
+            }
+            assert_eq!(link.state(), StationState::Connected);
+            let deadline = returned + Duration::from_secs(5);
+            assert!(!retry.begin_attempt(&link, deadline));
+
+            link.set_associated(false);
+            assert!(retry.begin_attempt(&link, deadline));
+        }
     }
 
     #[test]
     fn driver_unavailability_prevents_retries_even_with_late_events() {
-        let link = StationLink::new();
-        let mut retry = WifiReconnect::new();
-        assert!(retry.begin_attempt(&link, Duration::ZERO));
-        link.disable();
-        retry.attempt_returned(Duration::ZERO);
-        link.connect_rejected();
-        link.set_associated(true);
-        link.set_associated(false);
-        assert_eq!(link.state(), StationState::Unavailable);
-        assert!(!retry.begin_attempt(&link, RETRY_INTERVAL));
+        let association_events = [true, false];
+        for stop_after in 0..=association_events.len() {
+            let (before_stop, after_stop) = association_events.split_at(stop_after);
+            let link = StationLink::new();
+            let mut retry = WifiReconnect::new();
+            assert!(retry.begin_attempt(&link, Duration::ZERO));
+            for &associated in before_stop {
+                link.set_associated(associated);
+            }
+
+            link.disable();
+            retry.attempt_returned(Duration::ZERO);
+            link.connect_rejected();
+            assert_eq!(link.state(), StationState::Unavailable);
+            for &associated in after_stop {
+                link.set_associated(associated);
+                assert_eq!(link.state(), StationState::Unavailable);
+            }
+            assert!(!retry.begin_attempt(&link, RETRY_INTERVAL));
+        }
     }
 }
