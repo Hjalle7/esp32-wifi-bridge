@@ -134,13 +134,24 @@ screen /dev/cu.usbserial-0001 115200
    client isolation for this test. Record the lease, ARP resolution and packet
    counts for both directions. On macOS, `ipconfig getpacket enX`, `arp -an`
    and `ping -c 5 <IPv4-address>` are useful; select the wired interface.
+5. **Recover from a Wi-Fi outage.** Leave Ethernet connected and keep traffic
+   running. Disable the test AP briefly, then repeat with an outage long
+   enough to observe several attempts. Restore the AP each time and confirm
+   Ethernet stays up, the bridge associates with the same cloned MAC without
+   rebooting, and DHCP, ARP and bidirectional IPv4 work again. On the QE-4,
+   confirm Home Assistant can resume Modbus TCP polling.
 
 CI runs formatting, Clippy, 8 callback-gate tests, 3 mediator ABI-stub tests,
-3 TX diagnostics tests and a locked release build with dummy credentials.
+3 TX diagnostics tests, 5 reconnection tests and a locked release build with
+dummy credentials.
 The release job converts the ELF with the esptool settings above and checks
 the factory application and bootloader sizes against the generated layout.
-Startup failures can panic and Wi-Fi connects once.
-Sustained traffic, link-loss recovery and watchdog behavior remain unverified.
+
+The bridge retries Wi-Fi association after a disconnect, including during
+extended AP outages. It waits at least five seconds between connection
+requests and lets each accepted association attempt finish. Startup failures
+can still abort. Sustained traffic and link-loss recovery need hardware
+validation.
 
 ### Ethernet and Wi-Fi TX diagnostics
 
@@ -149,7 +160,7 @@ line about every second, including idle intervals. This example omits the log
 prefix.
 
 ```text
-eth link=up attempts=814 ok=808 no_mem=6 link_down=0 other=0 gate=0 no_mem_len_buckets=[6, 0, 0] no_mem_len_min_max=Some((64, 1514)) | wifi attempts=263 ok=263 failed=0 gate=0
+eth link=up attempts=814 ok=808 no_mem=6 link_down=0 other=0 gate=0 no_mem_len_buckets=[6, 0, 0] no_mem_len_min_max=Some((64, 1514)) | wifi sta=Connected attempts=263 ok=263 failed=0 gate=0
 ```
 
 | Field | Meaning |
@@ -159,6 +170,7 @@ eth link=up attempts=814 ok=808 no_mem=6 link_down=0 other=0 gate=0 no_mem_len_b
 | `no_mem_len_buckets` | Counts of Ethernet `ESP_ERR_NO_MEM` frames in the inclusive size buckets ≤1522, 1523–45660, and >45660 bytes, in that order. The verified TX ring has 30 buffers of 1522 bytes each. |
 | `no_mem_len_min_max` | Smallest and largest `ESP_ERR_NO_MEM` frame lengths in bytes since boot. `None` means no such failures observed so far. |
 | Wi-Fi `failed` | Calls returning any error from the Wi-Fi TX API. |
+| Wi-Fi `sta` | Station state sampled at report time. `Unavailable` means the station stopped or returned a driver or configuration error that suspends retries. |
 | `gate` | Frames rejected by that direction's forwarding gate while closed or busy, including Ethernet frames seen during MAC learning in the first Wi-Fi report. These frames do not enter `attempts`. |
 | Ethernet `link` | Event-based link state sampled at report time. Speed and duplex are omitted. |
 

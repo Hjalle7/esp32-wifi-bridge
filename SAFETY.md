@@ -119,6 +119,50 @@ construct an invalid slice before invoking the supplied callback. Both
 direct STA RX registration and leave TX-done callbacks unregistered.
 [svc 0.53.0 Wi-Fi wrapper](https://github.com/esp-rs/esp-idf-svc/blob/d42a67836f965eb6fd5d2b04785ab294751c6aa7/src/wifi.rs).
 
+## Wi-Fi reconnection
+
+The bridge subscribes before starting the station. `STA_CONNECTED` means the
+Wi-Fi data path is ready. `STA_DISCONNECTED` covers both a failed attempt and
+loss of an established association. `STA_STOP` makes the station unavailable
+for retries. The owner starts the first attempt after both start calls succeed.
+The bridge uses station events because it forwards at layer 2 and owns no IP
+interface. [ESP-IDF v6.1.1 station events](https://github.com/espressif/esp-idf/blob/v6.1.1/docs/en/api-guides/wifi-driver/overview.rst)
+
+The observer only updates a static atomic byte. `Running` owns its svc
+subscription, which unregisters on the owner task before the Wi-Fi driver
+destructor.
+ESP-IDF v6.1.1 serializes dispatch and unregister from another task with the
+event loop mutex. The packet teardown sequence still closes and drains the
+gates, unregisters STA RX, clears the handle and joins the Ethernet link timer.
+[ESP-IDF event loop](https://github.com/espressif/esp-idf/blob/v6.1.1/components/esp_event/esp_event.c)
+
+Only the main task calls `WifiDriver::connect()`, which wraps
+`esp_wifi_connect()`. The owner marks the attempt in progress before calling,
+so an event delivered during the call can record the outcome. The station
+configuration leaves `failure_retry_cnt` at zero. A successful request waits
+for an association or disconnection event. The owner uses monotonic time to
+allow the next attempt at least five seconds after the call returns. A
+retryable synchronous error releases the in-progress state if no outcome
+has superseded it. `ESP_ERR_WIFI_CONN` is ambiguous and can indicate an
+already active association attempt. The SDK rejects that request and the
+owner still observes the retry interval.
+
+`ESP_ERR_WIFI_NOT_INIT`, `ESP_ERR_WIFI_NOT_STARTED`, `ESP_ERR_WIFI_MODE` and
+`ESP_ERR_WIFI_SSID` indicate that retries against the current station state or
+configuration cannot help. The owner logs the error and suspends retries. An
+unexpected station stop also suspends retries. Ordinary disconnect reasons,
+including AP absence or authentication failure, allow indefinite retry. An
+accepted attempt with a missing outcome event stays in progress. Detecting and
+recovering from that condition belongs to future driver supervision.
+[ESP-IDF v6.1.1 connect contract](https://github.com/espressif/esp-idf/blob/v6.1.1/components/esp_wifi/include/esp_wifi.h)
+
+The forwarding gates protect driver lifetimes. They stay open while the
+drivers remain started and owned, including during association retries. Wi-Fi
+TX errors during the outage still use the existing counters, and RX callbacks
+release every buffer. In the inspected ESP32 archives, `wifi_sta_reg_rxcb`
+stores the station RX function in `sta_rxcb`, which remains registered across
+association changes. Retries keep both driver instances and the station MAC.
+
 ## Admission, buffer release and TX
 
 The two RX tasks are serialized per direction and can run concurrently with
@@ -199,16 +243,17 @@ rustc +stable --edition=2021 --test tests/host/ethernet_rx.rs -o /tmp/bridge-eth
 /tmp/bridge-ethernet-tests
 rustc +stable --edition=2021 --test tests/host/tx_diagnostics.rs -o /tmp/bridge-tx-tests
 /tmp/bridge-tx-tests
+rustc +stable --edition=2021 --test src/wifi_reconnect.rs -o /tmp/bridge-wifi-reconnect-tests
+/tmp/bridge-wifi-reconnect-tests
 ```
 
 These cover admission and draining, static mediator dispatch after modeled
-driver removal, low-level hooks, MAC lookup failure and TX counter
-classification. The host suites use stubs for driver interfaces. Separately
-check formatting, Clippy, locked release cross-compilation and partition fit
-with dummy credentials.
+driver removal, low-level hooks, MAC lookup failure, TX counter
+classification and the station retry state transitions. Driver interfaces in
+the host suites use stubs. Check formatting, Clippy, locked release
+cross-compilation and partition fit with dummy credentials.
 
 WT32-ETH01 hardware validation is still required for MAC cloning,
 DHCP/ARP and bidirectional forwarding, sustained traffic and Ethernet TX
-diagnostics, link changes during traffic, and startup and teardown with RX/TX
-in flight. The existing application connects once and reports TX outcomes
-while running. Startup failures can abort.
+diagnostics, repeated short and extended Wi-Fi outages under traffic, and
+startup and teardown with RX/TX in flight. Startup failures can abort.

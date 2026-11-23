@@ -30,7 +30,7 @@
 
 ## Reliability and safety
 
-- Require automatic WiFi reconnection, watchdog supervision, and recovery from initialization failures in runtime development. These are development requirements, not assertions that the current code implements them: startup uses `expect`/`unwrap`, WiFi connects once, and `main` only idles afterward; application-level recovery and watchdog supervision are not implemented in the inspected source. Address gaps within the requested task's scope; do not add functionality to documentation-only changes.
+- Preserve automatic Wi-Fi reconnection in runtime development. Initialization recovery and watchdog supervision are also runtime requirements. Track their status in [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) and address them within the requested task's scope.
 - Review every unsafe block and callback change for ownership, buffer lifetimes, stable driver addresses, callback registration and unregistration, drop order, aliasing and concurrent access. Preserve the static RMII `stack_input_info` mediator, atomic gates and C Ethernet handle. Keep RX-only Wi-Fi registration because svc 0.53.0 still has the TX wrapper defect. Preserve gate draining, explicit Wi-Fi RX unregister, the Ethernet link-timer barrier and Wi-Fi-before-Ethernet destruction. Follow the version-specific contracts and retained RMII resource limitation in `SAFETY.md`.
 - Minimal UART diagnostics, including RSSI and connection/disconnection events, are allowed. Keep them lightweight and free of secrets. `log` currently uses `release_max_level_warn` for the hardware baseline. Keep packet callbacks free of logging.
 
@@ -41,7 +41,7 @@
 
 ## Validation and delivery
 
-- Keep changes focused and run the standalone `rustc +stable --test` commands in `SAFETY.md` for all 14 host tests. CI runs the callback-gate, static-mediator ABI-stub and TX diagnostics suites. The ESP binary uses `harness = false`.
+- Keep changes focused and run the standalone `rustc +stable --test` commands in `SAFETY.md`. CI runs the callback-gate, static-mediator ABI-stub, TX diagnostics and Wi-Fi reconnection suites. The ESP binary uses `harness = false`.
 - With the ESP toolchain and suitable environment values, follow the existing CI checks: `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features --workspace -- -D warnings`, and `cargo build --release --locked`. Use dummy credentials for automated checks.
 - Recheck the application image and the 1 MiB factory partition budget after dependency changes. Record the toolchain and commit when comparing sizes. Historical ESP-IDF v5.3.3 sizes are recorded in `SAFETY.md` and `README.md`.
 - Report source inspection, automated tests, compilation, and physical hardware validation separately, including skipped checks and their reasons. Compilation cannot establish forwarding, reconnection, watchdog, or recovery behavior. State explicitly when WT32-ETH01 hardware validation was unavailable. `cargo run --release` flashes hardware via the configured runner; it is not a build-only check.

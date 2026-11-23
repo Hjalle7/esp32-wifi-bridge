@@ -10,28 +10,30 @@ use core::{
 
 use esp_idf_svc::{
     eth::{EthDriver, RmiiClockConfig, RmiiEth, RmiiEthChipset},
-    eventloop::EspSystemEventLoop,
+    eventloop::{EspSystemEventLoop, EspSystemSubscription},
     hal::{delay::FreeRtos, modem::Modem, peripherals::Peripherals},
     handle::RawHandle,
     nvs::EspDefaultNvsPartition,
     sys::{self, esp, esp_err_t, ESP_OK},
     timer::EspTaskTimerService,
-    wifi::{AuthMethod, ClientConfiguration, Configuration, WifiDeviceId, WifiDriver},
+    wifi::{AuthMethod, ClientConfiguration, Configuration, WifiDeviceId, WifiDriver, WifiEvent},
 };
 
 use once_cell::sync::OnceCell;
 
 use crate::callback_gate::CallbackGate;
 use crate::tx_diagnostics::{EthernetTxCounters, WifiTxCounters};
+use crate::wifi_reconnect::{StationLink, WifiReconnect};
 
-// ESP-IDF Wi-Fi and Peripherals::take() are singletons. Callbacks use only these
-// static gates and the C Ethernet handle, never a pointer/reference to a Rust driver.
+// ESP-IDF Wi-Fi and Peripherals::take() are singletons. Callbacks use static
+// state and the C Ethernet handle, independent of the Rust driver values.
 static TO_WIFI: CallbackGate = CallbackGate::new();
 static TO_ETH: CallbackGate = CallbackGate::new();
 static ETH_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
 static CLIENT_MAC: OnceCell<[u8; 6]> = OnceCell::new();
 static ETH_TX: EthernetTxCounters = EthernetTxCounters::new();
 static WIFI_TX: WifiTxCounters = WifiTxCounters::new();
+static STATION_LINK: StationLink = StationLink::new();
 
 const SSID: &str = env!("WIFI_SSID");
 const PASS: &str = env!("WIFI_PASS");
@@ -73,6 +75,7 @@ pub struct EthReady {
 /// In this state, Wi-Fi is ready to be transitioned into the [`Running`] state.
 /// Notably, the Wi-Fi `Sta` MAC has been set to `client_mac`.
 pub struct WifiReady {
+    wifi_events: EspSystemSubscription<'static>,
     eth: EthDriver<'static, RmiiEth>,
     wifi: WifiDriver<'static>,
 }
@@ -82,8 +85,11 @@ pub struct WifiReady {
 /// Owns both drivers. Drop closes and drains forwarding before destroying Wi-Fi,
 /// then Ethernet (field order). See `SAFETY.md` for the callback/ESP-IDF contracts.
 pub struct Running {
+    // Unregister the station event observer before WifiDriver drops.
+    _wifi_events: EspSystemSubscription<'static>,
     wifi: WifiDriver<'static>,
     eth: EthDriver<'static, RmiiEth>,
+    reconnect: WifiReconnect,
 }
 
 impl Drop for Running {
@@ -213,8 +219,20 @@ impl From<Bridge<EthReady>> for Bridge<WifiReady> {
         wifi.set_mac(WifiDeviceId::Sta, val.state.client_mac)
             .expect("Failed to set Wi-Fi MAC!");
 
+        let wifi_events = val
+            .state
+            .sysloop
+            .subscribe::<WifiEvent, _>(|event| match event {
+                WifiEvent::StaConnected(_) => STATION_LINK.set_associated(true),
+                WifiEvent::StaDisconnected(_) => STATION_LINK.set_associated(false),
+                WifiEvent::StaStopped => STATION_LINK.disable(),
+                _ => (),
+            })
+            .expect("Failed to subscribe to Wi-Fi station events!");
+
         Self {
             state: WifiReady {
+                wifi_events,
                 eth: val.state.eth,
                 wifi,
             },
@@ -230,8 +248,10 @@ impl From<Bridge<WifiReady>> for Bridge<Running> {
         // Establish teardown ownership before registration or any fallible start.
         // Gates stay closed throughout fallible driver initialization.
         let mut running = Running {
+            _wifi_events: val.state.wifi_events,
             wifi: val.state.wifi,
             eth: val.state.eth,
+            reconnect: WifiReconnect::new(),
         };
 
         let wifi_config = Configuration::Client(ClientConfiguration {
@@ -260,7 +280,6 @@ impl From<Bridge<WifiReady>> for Bridge<Running> {
 
         running.wifi.start().expect("Failed to start Wi-Fi!");
         running.eth.start().expect("Failed to start Ethernet!");
-        running.wifi.connect().expect("Failed to connect to Wi-Fi!");
 
         // Release/acquire admission publishes the handle only after both drivers
         // are owned and started. Neither callback accesses the Rust driver values.
@@ -272,6 +291,34 @@ impl From<Bridge<WifiReady>> for Bridge<Running> {
 }
 
 impl Bridge<Running> {
+    pub fn poll_wifi(&mut self, clock: &EspTaskTimerService) {
+        if !self
+            .state
+            .reconnect
+            .begin_attempt(&STATION_LINK, clock.now())
+        {
+            return;
+        }
+
+        let result = self.state.wifi.connect();
+        self.state.reconnect.attempt_returned(clock.now());
+        if let Err(error) = result {
+            match error.code() {
+                sys::ESP_ERR_WIFI_NOT_INIT
+                | sys::ESP_ERR_WIFI_NOT_STARTED
+                | sys::ESP_ERR_WIFI_MODE
+                | sys::ESP_ERR_WIFI_SSID => {
+                    STATION_LINK.disable();
+                    log::warn!("Wi-Fi connect unavailable: {error}");
+                }
+                _ => {
+                    STATION_LINK.connect_rejected();
+                    log::warn!("Wi-Fi connect request failed: {error}");
+                }
+            }
+        }
+    }
+
     pub fn report_tx_diagnostics(&self) {
         let link = match self.state.eth.is_connected() {
             Ok(true) => "up",
@@ -280,10 +327,11 @@ impl Bridge<Running> {
         };
         let eth = ETH_TX.take_interval();
         let wifi = WIFI_TX.take_interval();
+        let station = STATION_LINK.state();
         log::warn!(
             target: "bridge.tx",
             "eth link={link} attempts={} ok={} no_mem={} link_down={} other={} gate={} \
-             no_mem_len_buckets={:?} no_mem_len_min_max={:?} | wifi attempts={} ok={} failed={} gate={}",
+             no_mem_len_buckets={:?} no_mem_len_min_max={:?} | wifi sta={station:?} attempts={} ok={} failed={} gate={}",
             eth.attempts(), eth.ok, eth.no_mem(), eth.link_down, eth.other, eth.gate,
             eth.no_mem_len_buckets, ETH_TX.no_mem_len_range(),
             wifi.attempts(), wifi.ok, wifi.failed, wifi.gate,
