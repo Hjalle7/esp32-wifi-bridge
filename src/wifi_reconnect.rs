@@ -91,7 +91,7 @@ impl WifiReconnect {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "espidf")))]
 mod tests {
     use super::{Duration, StationLink, StationState, WifiReconnect, RETRY_INTERVAL};
 
