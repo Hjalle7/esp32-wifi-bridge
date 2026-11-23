@@ -27,6 +27,12 @@ real credentials and credential-bearing firmware private. [README](README.md)
   frame is dropped. The MAC is held in memory for the firmware lifetime.
   The bridge forwards frames directly through the two RX callbacks with
   no application queue, packet worker or per-frame allocation. [Bridge state machine](src/bridge.rs)
+- `Running` requests association from the main loop. A system event observer
+  records station association, disconnection and stop in atomic state. After
+  an outage the owner retries indefinitely, with at least five seconds from
+  each call's return to the next call and one accepted attempt at a time.
+  Reconnection uses the same cloned MAC and keeps Ethernet running.
+  [Retry policy](src/wifi_reconnect.rs) · [Station lifecycle](SAFETY.md#wi-fi-reconnection)
 - `Running` owns both drivers. Static callbacks use nonblocking gates and a
   published C Ethernet handle. Both TX APIs copy before returning. Each
   Ethernet RX allocation and Wi-Fi RX token must be released exactly once,
@@ -118,12 +124,13 @@ real credentials and credential-bearing firmware private. [README](README.md)
   counters measure API outcomes, so correlate them with packet loss before
   changing the DMA ring. Verify enclosure RF performance, antenna needs
   and a suitable power supply. [Bench procedure and diagnostics](README.md)
-- Define bounded Wi-Fi reconnect, initialization recovery and watchdog
-  behavior. Currently startup failures can abort, Wi-Fi is asked to connect
-  once, and the main loop only reports diagnostics. Decide how to detect
-  a stuck datapath versus an ordinary outage, what warrants a device reset
-  and whether MAC persistence or a client replacement procedure is needed.
-  Keep recovery compatible with the firmware-lifetime RMII ownership.
+- Startup failures can still abort. Future initialization recovery and
+  watchdog work should handle a stopped station, a missing association outcome
+  event and a stuck datapath. Ordinary disconnection events can recur for an
+  extended outage, so elapsed outage time alone is insufficient evidence of a
+  driver fault. Decide what warrants a device reset and whether MAC
+  persistence or a client replacement procedure is needed. Keep recovery
+  compatible with the firmware-lifetime RMII ownership.
   [Startup and main loop](src/main.rs) · [Driver lifetimes](SAFETY.md)
 - Decide whether field provisioning is needed and how to authorize access
   and restore service after credential changes. Ethernet HTTP provisioning
