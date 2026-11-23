@@ -1,5 +1,11 @@
 # Development guidelines
 
+## Project context
+
+- Read [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) before substantial development work.
+- Verify current code and locked dependencies against the context before relying on it.
+- Update `PROJECT_CONTEXT.md` when architectural decisions, toolchain baselines, or major project status change. Keep `AGENTS.md` focused on agent instructions and record project history in `PROJECT_CONTEXT.md`.
+
 ## Scope and architecture
 
 - These instructions apply only to `Hjalle7/esp32-wifi-bridge` (Rust).
